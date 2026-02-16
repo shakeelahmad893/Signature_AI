@@ -1,0 +1,17 @@
+# ── Data (too large for GitHub) ──
+data/genuine/
+data/forged/
+
+# ── Trained models ──
+models/*.h5
+models/*.weights.h5
+models/*.keras
+
+# ── Training artifacts ──
+training_history.png
+__pycache__/
+*.pyc
+
+# ── OS files ──
+.DS_Store
+Thumbs.db
