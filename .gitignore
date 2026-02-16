@@ -1,6 +1,7 @@
 # ── Data (too large for GitHub) ──
 data/genuine/
 data/forged/
+models/data/
 
 # ── Trained models ──
 models/*.h5

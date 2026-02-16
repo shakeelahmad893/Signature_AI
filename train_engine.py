@@ -37,7 +37,7 @@ GENUINE_DIR = os.path.join(BASE_DIR, "data", "genuine")
 FORGED_DIR  = os.path.join(BASE_DIR, "data", "forged")
 MODEL_SAVE_PATH = os.path.join(BASE_DIR, "models", "my_signature_ai.h5")
 CHECKPOINT_PATH = os.path.join(BASE_DIR, "models", "checkpoint.weights.h5")
-EPOCHS = 20
+EPOCHS = 50
 BATCH_SIZE = 32
 
 
@@ -128,7 +128,58 @@ def create_pairs(genuine_images, forged_images, max_pairs=10000):
     pair_b = np.array(pair_b_list)
     labels = np.array(labels, dtype="float32")
 
+    # Shuffle the pairs
+    indices = np.arange(len(labels))
+    np.random.shuffle(indices)
+    pair_a = pair_a[indices]
+    pair_b = pair_b[indices]
+    labels = labels[indices]
+
     return pair_a, pair_b, labels
+
+
+def augment_image(img):
+    """
+    Apply random augmentations to a single image to increase data variety.
+    Helps prevent overfitting by creating slightly different versions.
+    """
+    # Random rotation (-10 to +10 degrees)
+    angle = np.random.uniform(-10, 10)
+    h, w = img.shape[:2]
+    M = cv2.getRotationMatrix2D((w / 2, h / 2), angle, 1.0)
+    img = cv2.warpAffine(img, M, (w, h), borderValue=1.0)
+
+    # Random shift (up to 5% of image size)
+    tx = np.random.uniform(-0.05, 0.05) * w
+    ty = np.random.uniform(-0.05, 0.05) * h
+    M_shift = np.float32([[1, 0, tx], [0, 1, ty]])
+    img = cv2.warpAffine(img, M_shift, (w, h), borderValue=1.0)
+
+    # Random brightness adjustment
+    brightness = np.random.uniform(0.85, 1.15)
+    img = np.clip(img * brightness, 0, 1)
+
+    return img
+
+
+def augment_pairs(pair_a, pair_b, labels):
+    """
+    Create augmented copies of all pairs, doubling the dataset size.
+    """
+    aug_a, aug_b = [], []
+    for i in range(len(pair_a)):
+        aug_a.append(augment_image(pair_a[i].copy()))
+        aug_b.append(augment_image(pair_b[i].copy()))
+
+    # Combine original + augmented
+    all_a = np.concatenate([pair_a, np.array(aug_a)], axis=0)
+    all_b = np.concatenate([pair_b, np.array(aug_b)], axis=0)
+    all_labels = np.concatenate([labels, labels], axis=0)
+
+    # Shuffle again
+    indices = np.arange(len(all_labels))
+    np.random.shuffle(indices)
+    return all_a[indices], all_b[indices], all_labels[indices]
 
 
 def plot_training_history(history, save_path="training_history.png"):
@@ -249,7 +300,12 @@ def train():
 
     model.summary()
 
-    # ---- 5. Train with checkpoint callback ----
+    # ---- 5. Augment training data ----
+    print("\n[INFO] Augmenting training data ...")
+    train_a, train_b, train_labels = augment_pairs(train_a, train_b, train_labels)
+    print(f"[INFO] Training samples after augmentation: {len(train_labels)}")
+
+    # ---- 6. Train with callbacks ----
     os.makedirs(os.path.dirname(CHECKPOINT_PATH), exist_ok=True)
 
     class SaveEpochCallback(tf.keras.callbacks.Callback):
@@ -261,19 +317,37 @@ def train():
     checkpoint_cb = tf.keras.callbacks.ModelCheckpoint(
         filepath=CHECKPOINT_PATH,
         save_weights_only=True,
-        save_best_only=False,      # save every epoch
+        save_best_only=True,       # save only best val_loss
+        monitor="val_loss",
+        verbose=1,
+    )
+
+    early_stop = tf.keras.callbacks.EarlyStopping(
+        monitor="val_loss",
+        patience=8,                # stop if val_loss doesn't improve for 8 epochs
+        restore_best_weights=True,
+        verbose=1,
+    )
+
+    lr_reduce = tf.keras.callbacks.ReduceLROnPlateau(
+        monitor="val_loss",
+        factor=0.5,               # halve the LR when stuck
+        patience=4,
+        min_lr=1e-6,
         verbose=1,
     )
 
     remaining = EPOCHS - initial_epoch
-    print(f"\n[INFO] Training for {remaining} remaining epochs ({initial_epoch + 1} → {EPOCHS}) ...")
+    print(f"\n[INFO] Training for up to {remaining} remaining epochs ({initial_epoch + 1} → {EPOCHS}) ...")
+    print("[INFO] EarlyStopping enabled (patience=8) — training will stop if val_loss doesn't improve.")
     history = model.fit(
         [train_a, train_b], train_labels,
         validation_data=([val_a, val_b], val_labels),
         batch_size=BATCH_SIZE,
         epochs=EPOCHS,
         initial_epoch=initial_epoch,
-        callbacks=[checkpoint_cb, SaveEpochCallback()],
+        callbacks=[checkpoint_cb, SaveEpochCallback(), early_stop, lr_reduce],
+        shuffle=True,
         verbose=1,
     )
 

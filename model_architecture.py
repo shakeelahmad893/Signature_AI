@@ -119,7 +119,7 @@ def build_siamese_model(input_shape=(105, 105, 1)):
 
     # Compile with binary crossentropy (proper loss for sigmoid output)
     model.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=5e-4),
+        optimizer=tf.keras.optimizers.Adam(learning_rate=1e-4),
         loss="binary_crossentropy",
         metrics=["accuracy"],
     )
