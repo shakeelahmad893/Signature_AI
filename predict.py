@@ -14,11 +14,19 @@ Usage
 """
 
 import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # Suppress TF warnings
+
 import sys
 import argparse
 import numpy as np
 import cv2
+import warnings
+warnings.filterwarnings('ignore')
+
 import tensorflow as tf
+tf.get_logger().setLevel('ERROR')
+
+from model_architecture import build_siamese_model
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Configuration
@@ -59,7 +67,7 @@ def predict(model, genuine_path, test_path):
     Returns
     -------
     score : float
-        Similarity score (0–1). Higher = more likely genuine.
+        Similarity score (0-1). Higher = more likely genuine.
     verdict : str
         'GENUINE' or 'FORGED'
     """
@@ -79,7 +87,7 @@ def predict(model, genuine_path, test_path):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Signature Forgery Detector — Predict if a signature is genuine or forged."
+        description="Signature Forgery Detector - Predict if a signature is genuine or forged."
     )
     parser.add_argument("--genuine", type=str, help="Path to the genuine (reference) signature image")
     parser.add_argument("--test", type=str, help="Path to the test signature image to verify")
@@ -101,20 +109,22 @@ def main():
     print(f"\n{'='*60}")
     print("  Signature Forgery Detector — Prediction")
     print(f"{'='*60}")
-    print(f"\n[INFO] Loading model from {MODEL_PATH} ...")
 
     if not os.path.exists(MODEL_PATH):
         print(f"[ERROR] Model not found at: {MODEL_PATH}")
         print("        Please train the model first: python train_engine.py")
         sys.exit(1)
 
-    model = tf.keras.models.load_model(MODEL_PATH)
+    # Rebuild architecture and load trained weights
+    print(f"\n[INFO] Loading model ...")
+    model = build_siamese_model(input_shape=(IMG_SHAPE[0], IMG_SHAPE[1], 1))
+    model.load_weights(MODEL_PATH)
     print("[INFO] Model loaded successfully!")
 
     # Predict
     print(f"\n[INFO] Comparing signatures ...")
-    print(f"       Genuine : {args.genuine}")
-    print(f"       Test    : {args.test}")
+    print(f"       Genuine : {os.path.basename(args.genuine)}")
+    print(f"       Test    : {os.path.basename(args.test)}")
 
     score, verdict = predict(model, args.genuine, args.test)
 
