@@ -159,6 +159,10 @@ def augment_image(img):
     brightness = np.random.uniform(0.85, 1.15)
     img = np.clip(img * brightness, 0, 1)
 
+    # Restore channel dimension if lost by OpenCV
+    if img.ndim == 2:
+        img = np.expand_dims(img, axis=-1)
+
     return img
 
 
