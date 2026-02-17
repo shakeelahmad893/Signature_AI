@@ -15,6 +15,13 @@ import tensorflow as tf
 from tensorflow.keras import layers, Model, backend as K
 
 
+@tf.keras.utils.register_keras_serializable()
+class AbsDifference(layers.Layer):
+    """Compute element-wise absolute difference between two tensors."""
+    def call(self, inputs):
+        return tf.abs(inputs[0] - inputs[1])
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Base CNN (Shared Weights)
 # ──────────────────────────────────────────────────────────────────────────────
@@ -96,9 +103,7 @@ def build_siamese_model(input_shape=(105, 105, 1)):
     embedding_b = base_network(input_b)
 
     # Compare embeddings using multiple similarity measures
-    abs_diff = layers.Lambda(
-        lambda x: tf.abs(x[0] - x[1]), name="abs_difference"
-    )([embedding_a, embedding_b])
+    abs_diff = AbsDifference(name="abs_difference")([embedding_a, embedding_b])
 
     product = layers.Multiply(name="element_product")(
         [embedding_a, embedding_b]

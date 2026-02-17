@@ -34,7 +34,7 @@ from model_architecture import build_siamese_model
 
 IMG_SHAPE = (105, 105)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-MODEL_PATH = os.path.join(BASE_DIR, "models", "my_signature_ai.h5")
+MODEL_PATH = os.path.join(BASE_DIR, "models", "my_signature_ai.weights.h5")
 THRESHOLD = 0.5  # Above = genuine, Below = forged
 
 

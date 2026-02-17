@@ -4,10 +4,11 @@ train_engine.py
 Training pipeline for the Siamese Signature Forgery Detector.
 
 This script:
-  1. Loads genuine & forged signature images from  data/genuine  and  data/forged.
-  2. Creates balanced positive (genuine–genuine) and negative (genuine–forged) pairs.
-  3. Trains the Siamese model for 20 epochs.
-  4. Saves the trained model to  models/my_signature_ai.h5.
+  1. Loads genuine & forged signature images grouped by person identity.
+  2. Creates person-aware pairs: same-person genuine (positive),
+     same-person forgery (negative), different-person (negative).
+  3. Trains the Siamese model with augmentation, EarlyStopping, and LR scheduling.
+  4. Saves the trained weights to  models/my_signature_ai.weights.h5.
 
 Usage
 -----
@@ -35,7 +36,7 @@ IMG_SHAPE = (105, 105)           # H × W expected by the model
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 GENUINE_DIR = os.path.join(BASE_DIR, "data", "genuine")
 FORGED_DIR  = os.path.join(BASE_DIR, "data", "forged")
-MODEL_SAVE_PATH = os.path.join(BASE_DIR, "models", "my_signature_ai.h5")
+MODEL_SAVE_PATH = os.path.join(BASE_DIR, "models", "my_signature_ai.weights.h5")
 CHECKPOINT_PATH = os.path.join(BASE_DIR, "models", "checkpoint.weights.h5")
 EPOCHS = 50
 BATCH_SIZE = 32
@@ -122,8 +123,9 @@ def create_pairs(genuine_by_person, forged_by_person, max_pairs=12000):
 
     pair_a_list, pair_b_list, labels = [], [], []
 
-    # ---- Positive: Same person, genuine + genuine ----
-    for _ in range(third):
+    # ---- Positive: Same person, genuine + genuine (50% of pairs) ----
+    n_positive = max_pairs // 2
+    for _ in range(n_positive):
         pid = random.choice(person_ids)
         imgs = genuine_by_person[pid]
         if len(imgs) < 2:
@@ -133,9 +135,10 @@ def create_pairs(genuine_by_person, forged_by_person, max_pairs=12000):
         pair_b_list.append(imgs[j])
         labels.append(1)
 
-    # ---- Negative A: Same person, genuine + forged ----
+    # ---- Negative A: Same person, genuine + forged (25% of pairs) ----
+    n_neg_forgery = max_pairs // 4
     forged_ids = [p for p in person_ids if p in forged_by_person]
-    for _ in range(third):
+    for _ in range(n_neg_forgery):
         pid = random.choice(forged_ids)
         g_imgs = genuine_by_person[pid]
         f_imgs = forged_by_person[pid]
@@ -145,8 +148,9 @@ def create_pairs(genuine_by_person, forged_by_person, max_pairs=12000):
         pair_b_list.append(f_imgs[fi])
         labels.append(0)
 
-    # ---- Negative B: Different people, genuine + genuine ----
-    for _ in range(third):
+    # ---- Negative B: Different people, genuine + genuine (25% of pairs) ----
+    n_neg_diff = max_pairs // 4
+    for _ in range(n_neg_diff):
         pid1, pid2 = random.sample(person_ids, 2)
         img1 = random.choice(genuine_by_person[pid1])
         img2 = random.choice(genuine_by_person[pid2])
@@ -187,7 +191,7 @@ def augment_image(img):
 
     # Random brightness adjustment
     brightness = np.random.uniform(0.85, 1.15)
-    img = np.clip(img * brightness, 0, 1)
+    img = np.clip(img * brightness, 0, 1).astype("float32")
 
     # Restore channel dimension if lost by OpenCV
     if img.ndim == 2:
@@ -320,15 +324,7 @@ def train():
     if os.path.exists(CHECKPOINT_PATH):
         print(f"\n[INFO] Checkpoint found! Loading weights from {CHECKPOINT_PATH} ...")
         model.load_weights(CHECKPOINT_PATH)
-        # Read the epoch number from the checkpoint filename metadata
-        # We save epoch info in a small text file alongside the checkpoint
-        epoch_file = CHECKPOINT_PATH + ".epoch"
-        if os.path.exists(epoch_file):
-            with open(epoch_file, "r") as f:
-                initial_epoch = int(f.read().strip())
-            print(f"[INFO] Resuming from epoch {initial_epoch + 1}/{EPOCHS}")
-        else:
-            print("[INFO] Resuming from checkpoint (epoch unknown, restarting count)")
+        print("[INFO] Best checkpoint loaded. Training will continue to find even better weights.")
     else:
         print("[INFO] No checkpoint found — starting fresh.")
 
@@ -341,12 +337,6 @@ def train():
 
     # ---- 6. Train with callbacks ----
     os.makedirs(os.path.dirname(CHECKPOINT_PATH), exist_ok=True)
-
-    class SaveEpochCallback(tf.keras.callbacks.Callback):
-        """Saves the current epoch number alongside the checkpoint."""
-        def on_epoch_end(self, epoch, logs=None):
-            with open(CHECKPOINT_PATH + ".epoch", "w") as f:
-                f.write(str(epoch + 1))
 
     checkpoint_cb = tf.keras.callbacks.ModelCheckpoint(
         filepath=CHECKPOINT_PATH,
@@ -371,29 +361,25 @@ def train():
         verbose=1,
     )
 
-    remaining = EPOCHS - initial_epoch
-    print(f"\n[INFO] Training for up to {remaining} remaining epochs ({initial_epoch + 1} → {EPOCHS}) ...")
+    print(f"\n[INFO] Training for up to {EPOCHS} epochs ...")
     print("[INFO] EarlyStopping enabled (patience=8) — training will stop if val_loss doesn't improve.")
     history = model.fit(
         [train_a, train_b], train_labels,
         validation_data=([val_a, val_b], val_labels),
         batch_size=BATCH_SIZE,
         epochs=EPOCHS,
-        initial_epoch=initial_epoch,
-        callbacks=[checkpoint_cb, SaveEpochCallback(), early_stop, lr_reduce],
+        callbacks=[checkpoint_cb, early_stop, lr_reduce],
         shuffle=True,
         verbose=1,
     )
 
-    # ---- 6. Save final model ----
-    model.save(MODEL_SAVE_PATH)
-    print(f"\n[SUCCESS] Model saved to → {MODEL_SAVE_PATH}")
+    # ---- 7. Save final model weights ----
+    model.save_weights(MODEL_SAVE_PATH)
+    print(f"\n[SUCCESS] Model weights saved to → {MODEL_SAVE_PATH}")
 
     # Clean up checkpoint files after successful training
     if os.path.exists(CHECKPOINT_PATH):
         os.remove(CHECKPOINT_PATH)
-    if os.path.exists(CHECKPOINT_PATH + ".epoch"):
-        os.remove(CHECKPOINT_PATH + ".epoch")
     print("[INFO] Checkpoint files cleaned up.")
 
     plot_training_history(history)
