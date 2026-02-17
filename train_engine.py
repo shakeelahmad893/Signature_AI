@@ -45,27 +45,41 @@ BATCH_SIZE = 32
 # Helper Functions
 # ──────────────────────────────────────────────────────────────────────────────
 
-def load_images_from_folder(folder_path):
+def extract_person_id(filename):
     """
-    Read every image in *folder_path*, convert to grayscale, resize to
-    IMG_SHAPE, and normalise pixel values to [0, 1].
+    Extract person ID from CEDAR filename.
+    e.g. 'original_10_3.png' → 10, 'forgeries_5_12.png' → 5
+    """
+    parts = filename.replace(".png", "").replace(".jpg", "").split("_")
+    # Format: original_{person}_{sample} or forgeries_{person}_{sample}
+    if len(parts) >= 3:
+        try:
+            return int(parts[1])
+        except ValueError:
+            return None
+    return None
 
-    Parameters
-    ----------
-    folder_path : str
-        Path to a directory containing image files.
+
+def load_images_by_person(folder_path):
+    """
+    Read images from folder and group them by person ID.
 
     Returns
     -------
-    list[np.ndarray]
-        List of preprocessed images, each of shape (*IMG_SHAPE, 1).
+    dict[int, list[np.ndarray]]
+        Dictionary mapping person ID → list of preprocessed images.
     """
-    images = []
+    person_images = {}
     valid_extensions = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff")
 
     for filename in sorted(os.listdir(folder_path)):
         if not filename.lower().endswith(valid_extensions):
             continue
+
+        person_id = extract_person_id(filename)
+        if person_id is None:
+            continue
+
         filepath = os.path.join(folder_path, filename)
         img = cv2.imread(filepath, cv2.IMREAD_GRAYSCALE)
         if img is None:
@@ -73,55 +87,71 @@ def load_images_from_folder(folder_path):
             continue
         img = cv2.resize(img, IMG_SHAPE)
         img = img.astype("float32") / 255.0
-        img = np.expand_dims(img, axis=-1)          # (105, 105, 1)
-        images.append(img)
+        img = np.expand_dims(img, axis=-1)  # (105, 105, 1)
 
-    return images
+        if person_id not in person_images:
+            person_images[person_id] = []
+        person_images[person_id].append(img)
+
+    return person_images
 
 
-def create_pairs(genuine_images, forged_images, max_pairs=10000):
+def create_pairs(genuine_by_person, forged_by_person, max_pairs=12000):
     """
-    Build balanced training pairs using **random sampling** to avoid
-    memory issues.
+    Build PERSON-AWARE training pairs:
 
-    * **Positive pairs** (label = 1): randomly sampled pairs of two
-      different genuine signatures.
-    * **Negative pairs** (label = 0): randomly sampled pairs of one
-      genuine + one forged signature.
+    * **Positive pairs** (label = 1): Two genuine signatures from the
+      SAME person  →  these should MATCH.
+    * **Negative Type A** (label = 0): Genuine + forged of the SAME
+      person  →  forgery detection.
+    * **Negative Type B** (label = 0): Genuine signatures from
+      DIFFERENT people  →  inter-person variation.
 
     Parameters
     ----------
-    genuine_images : list[np.ndarray]
-    forged_images  : list[np.ndarray]
-    max_pairs      : int
-        Maximum TOTAL number of pairs (half positive, half negative).
-        Default 10,000 keeps memory around ~2 GB.
+    genuine_by_person : dict[int, list[np.ndarray]]
+    forged_by_person  : dict[int, list[np.ndarray]]
+    max_pairs         : int
 
     Returns
     -------
-    pair_a : np.ndarray of shape (N, 105, 105, 1)
-    pair_b : np.ndarray of shape (N, 105, 105, 1)
-    labels : np.ndarray of shape (N,)
+    pair_a, pair_b, labels
     """
-    half = max_pairs // 2
-    num_genuine = len(genuine_images)
-    num_forged  = len(forged_images)
+    third = max_pairs // 3
+    person_ids = sorted(genuine_by_person.keys())
 
     pair_a_list, pair_b_list, labels = [], [], []
 
-    # ---- Positive pairs (genuine – genuine) ----
-    for _ in range(half):
-        i, j = random.sample(range(num_genuine), 2)
-        pair_a_list.append(genuine_images[i])
-        pair_b_list.append(genuine_images[j])
+    # ---- Positive: Same person, genuine + genuine ----
+    for _ in range(third):
+        pid = random.choice(person_ids)
+        imgs = genuine_by_person[pid]
+        if len(imgs) < 2:
+            continue
+        i, j = random.sample(range(len(imgs)), 2)
+        pair_a_list.append(imgs[i])
+        pair_b_list.append(imgs[j])
         labels.append(1)
 
-    # ---- Negative pairs (genuine – forged) ----
-    for _ in range(half):
-        gi = random.randint(0, num_genuine - 1)
-        fi = random.randint(0, num_forged - 1)
-        pair_a_list.append(genuine_images[gi])
-        pair_b_list.append(forged_images[fi])
+    # ---- Negative A: Same person, genuine + forged ----
+    forged_ids = [p for p in person_ids if p in forged_by_person]
+    for _ in range(third):
+        pid = random.choice(forged_ids)
+        g_imgs = genuine_by_person[pid]
+        f_imgs = forged_by_person[pid]
+        gi = random.randint(0, len(g_imgs) - 1)
+        fi = random.randint(0, len(f_imgs) - 1)
+        pair_a_list.append(g_imgs[gi])
+        pair_b_list.append(f_imgs[fi])
+        labels.append(0)
+
+    # ---- Negative B: Different people, genuine + genuine ----
+    for _ in range(third):
+        pid1, pid2 = random.sample(person_ids, 2)
+        img1 = random.choice(genuine_by_person[pid1])
+        img2 = random.choice(genuine_by_person[pid2])
+        pair_a_list.append(img1)
+        pair_b_list.append(img2)
         labels.append(0)
 
     pair_a = np.array(pair_a_list)
@@ -240,30 +270,30 @@ def train():
     print("  Siamese Signature Forgery Detector — Training Engine")
     print("=" * 60)
 
-    # ---- 1. Load images ----
+    # ---- 1. Load images grouped by person ----
     print(f"\n[INFO] Loading genuine images from  {GENUINE_DIR} ...")
-    genuine_images = load_images_from_folder(GENUINE_DIR)
-    print(f"       → Found {len(genuine_images)} genuine images.")
+    genuine_by_person = load_images_by_person(GENUINE_DIR)
+    total_genuine = sum(len(v) for v in genuine_by_person.values())
+    print(f"       → Found {total_genuine} genuine images from {len(genuine_by_person)} people.")
 
     print(f"[INFO] Loading forged images from   {FORGED_DIR} ...")
-    forged_images = load_images_from_folder(FORGED_DIR)
-    print(f"       → Found {len(forged_images)} forged images.")
+    forged_by_person = load_images_by_person(FORGED_DIR)
+    total_forged = sum(len(v) for v in forged_by_person.values())
+    print(f"       → Found {total_forged} forged images from {len(forged_by_person)} people.")
 
-    if len(genuine_images) < 2:
+    if len(genuine_by_person) < 2:
         raise ValueError(
-            "Need at least 2 genuine images to form positive pairs. "
-            f"Found {len(genuine_images)} in '{GENUINE_DIR}'."
-        )
-    if len(forged_images) < 1:
-        raise ValueError(
-            "Need at least 1 forged image to form negative pairs. "
-            f"Found {len(forged_images)} in '{FORGED_DIR}'."
+            "Need at least 2 people with genuine images. "
+            f"Found {len(genuine_by_person)} in '{GENUINE_DIR}'."
         )
 
-    # ---- 2. Create pairs ----
-    print("\n[INFO] Creating training pairs (randomly sampled) ...")
-    pair_a, pair_b, labels = create_pairs(genuine_images, forged_images,
-                                          max_pairs=10000)
+    # ---- 2. Create person-aware pairs ----
+    print("\n[INFO] Creating PERSON-AWARE training pairs ...")
+    print("       → Positive:   same person, genuine + genuine")
+    print("       → Negative A: same person, genuine + forged")
+    print("       → Negative B: different people, genuine + genuine")
+    pair_a, pair_b, labels = create_pairs(genuine_by_person, forged_by_person,
+                                          max_pairs=12000)
     print(f"       → Total pairs : {len(labels)}")
     print(f"       → Positive    : {int(labels.sum())}")
     print(f"       → Negative    : {int(len(labels) - labels.sum())}")
